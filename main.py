@@ -4,6 +4,7 @@ import logging
 import uuid
 import hashlib
 import os
+import http
 from datetime import datetime
 from typing import Dict, Set, Optional
 import websockets
@@ -68,7 +69,6 @@ async def handle_login(ws, data, state):
         return False
     state["username"] = username
     online_users[username] = ws
-    # Отправить историю каналов и список пользователей
     channel_list = [{"id": cid, "name": ch["name"]} for cid, ch in channels.items()]
     history = {cid: ch["messages"][-50:] for cid, ch in channels.items()}
     await ws.send(json.dumps({
@@ -118,7 +118,6 @@ async def handle_dm(ws, data, state):
         "ts": datetime.utcnow().isoformat()
     }
     dm_history.setdefault(key, []).append(msg)
-    # Отправить отправителю и получателю
     await ws.send(json.dumps(msg))
     if target in online_users:
         try:
@@ -132,7 +131,6 @@ async def handle_voice_join(ws, data, state):
     if not username:
         return
     voice_rooms.setdefault(room_id, set()).add(username)
-    # Уведомить всех о входе в голосовой канал
     msg = {"type": "voice_join", "room": room_id, "user": username,
            "members": list(voice_rooms[room_id])}
     await broadcast_to_channel("__all__", msg)
@@ -148,7 +146,6 @@ async def handle_voice_leave(ws, data, state):
            "members": list(voice_rooms.get(room_id, set()))}
     await broadcast_to_channel("__all__", msg)
 
-# WebRTC signaling (offer/answer/ice)
 async def handle_signal(ws, data, state):
     username = state.get("username")
     target = data.get("target")
@@ -161,7 +158,6 @@ async def handle_signal(ws, data, state):
         pass
 
 async def handle_voice_data(ws, data, state):
-    """UDP-like: пересылаем аудио-чанки участникам комнаты"""
     username = state.get("username")
     room_id = data.get("room")
     if not username or not room_id or room_id not in voice_rooms:
@@ -184,7 +180,16 @@ HANDLERS = {
     "voice_data":  handle_voice_data,
 }
 
-async def handler(ws: WebSocketServerProtocol):
+async def health_check(connection, request):
+    """
+    Render шлёт HTTP GET /health для проверки живости сервиса.
+    Отвечаем 200 OK на любой не-WebSocket запрос.
+    """
+    if request.headers.get("Upgrade", "").lower() != "websocket":
+        response = connection.respond(http.HTTPStatus.OK, "PyChat server OK\n")
+        return response
+
+async def handler(ws):
     state = {"username": None}
     try:
         async for raw in ws:
@@ -193,8 +198,8 @@ async def handler(ws: WebSocketServerProtocol):
                 msg_type = data.get("type")
                 fn = HANDLERS.get(msg_type)
                 if fn:
-                    if msg_type in ("register", "login"):
-                        await fn(ws, data, state) if msg_type == "login" else await fn(ws, data)
+                    if msg_type == "register":
+                        await fn(ws, data)
                     else:
                         await fn(ws, data, state)
             except json.JSONDecodeError:
@@ -207,7 +212,6 @@ async def handler(ws: WebSocketServerProtocol):
         username = state.get("username")
         if username:
             online_users.pop(username, None)
-            # Убрать из голосовых комнат
             for room_id, members in list(voice_rooms.items()):
                 if username in members:
                     members.discard(username)
@@ -220,14 +224,16 @@ async def handler(ws: WebSocketServerProtocol):
 
 async def main():
     HOST = os.getenv("HOST", "0.0.0.0")
+    # Render задаёт PORT автоматически. Дефолт 8765 для локального запуска.
     PORT = int(os.getenv("PORT", 8765))
     logger.info(f"Сервер запущен на {HOST}:{PORT}")
     async with websockets.serve(
         handler, HOST, PORT,
+        process_request=health_check,
         ping_interval=20,
         ping_timeout=30,
-        max_size=10 * 1024 * 1024,  # 10MB для голосовых данных
-        compression=None,            # отключаем сжатие для скорости
+        max_size=10 * 1024 * 1024,
+        compression=None,
     ):
         await asyncio.Future()
 
