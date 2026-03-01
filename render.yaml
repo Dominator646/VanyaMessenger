@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: pychat-server
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: PORT
+        fromService:
+          type: web
+          name: pychat-server
+          property: port
